@@ -1,5 +1,7 @@
 # OneDrive for Omarchy
 
+https://github.com/user-attachments/assets/834d49cb-a171-433d-9312-c45267d417f4
+
 The [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) in the
 **Omarchy bar**: what it is doing, how far a long sync has come, the file it
 is on, pause and resume, a status check, and a settings view where every part
