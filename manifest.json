@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "id": "baskb.onedrive",
+  "name": "OneDrive",
+  "version": "1.2.0",
+  "author": "Bastiaan Kortenbout",
+  "license": "MIT",
+  "homepage": "https://github.com/baskb/omarchy-onedrive",
+  "description": "Live OneDrive sync status and per-file progress for the OneDrive Client for Linux (abraunegg) in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OneDrive",
+    "description": "Sync state, whole-run and per-file progress, recent files, pause/resume, login autostart and a settings view for the onedrive user service.",
+    "category": "Files",
+    "aliases": [
+      "onedrive"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 10,
+      "recentLimit": 12,
+      "quotaRefreshMin": 30,
+      "runBarMinSec": 60,
+      "showPercentInBar": true,
+      "showBarProgress": true,
+      "showRunCard": true,
+      "showTransferCard": true,
+      "showSyncDetails": true,
+      "showStorage": false,
+      "showRecent": true,
+      "showActions": true,
+      "notifyOnFailure": true,
+      "checkUpdates": true,
+      "updateCheckHours": 6
+    },
+    "schema": [
+      {
+        "key": "showPercentInBar",
+        "type": "boolean",
+        "label": "Percentage next to the bar icon",
+        "defaultValue": true,
+        "description": "The run or file percentage beside the cloud while syncing."
+      },
+      {
+        "key": "showBarProgress",
+        "type": "boolean",
+        "label": "Progress line under the bar icon",
+        "defaultValue": true,
+        "description": "A thin line that fills with the run while a long run is on."
+      },
+      {
+        "key": "showRunCard",
+        "type": "boolean",
+        "label": "Whole-run progress bar in the panel",
+        "defaultValue": true,
+        "description": "Files done and time left for a run longer than the threshold."
+      },
+      {
+        "key": "runBarMinSec",
+        "type": "integer",
+        "label": "Show the run bar from (seconds)",
+        "min": 0,
+        "max": 3600,
+        "step": 10,
+        "defaultValue": 60,
+        "description": "A run is one burst of announced uploads and downloads. Below this projected duration only the current file is shown."
+      },
+      {
+        "key": "showTransferCard",
+        "type": "boolean",
+        "label": "Current file card",
+        "defaultValue": true,
+        "description": "The file being transferred with its own progress bar."
+      },
+      {
+        "key": "showSyncDetails",
+        "type": "boolean",
+        "label": "Sync details",
+        "defaultValue": true,
+        "description": "Last sync, last cycle, tally, interval and folder."
+      },
+      {
+        "key": "showStorage",
+        "type": "boolean",
+        "label": "Storage usage",
+        "defaultValue": false,
+        "description": "Used and total space, asked from Microsoft."
+      },
+      {
+        "key": "showRecent",
+        "type": "boolean",
+        "label": "Recent files",
+        "defaultValue": true,
+        "description": "The latest transferred files."
+      },
+      {
+        "key": "recentLimit",
+        "type": "integer",
+        "label": "Recent files to keep",
+        "min": 1,
+        "max": 50,
+        "step": 1,
+        "defaultValue": 12,
+        "description": ""
+      },
+      {
+        "key": "showActions",
+        "type": "boolean",
+        "label": "Action buttons",
+        "defaultValue": true,
+        "description": "Folder, restart, check and storage buttons."
+      },
+      {
+        "key": "notifyOnFailure",
+        "type": "boolean",
+        "label": "Notify on failures",
+        "defaultValue": true,
+        "description": "A desktop notification when a sync cycle fails or the client logs an error."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Status refresh interval (seconds)",
+        "min": 3,
+        "max": 600,
+        "step": 1,
+        "defaultValue": 10,
+        "description": ""
+      },
+      {
+        "key": "quotaRefreshMin",
+        "type": "integer",
+        "label": "Storage quota refresh (minutes)",
+        "min": 1,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often the panel may ask Microsoft for the storage quota when opened."
+      },
+      {
+        "key": "checkUpdates",
+        "type": "boolean",
+        "label": "Check for client updates",
+        "defaultValue": true,
+        "description": "Asks aur.archlinux.org and api.github.com for the newest onedrive-abraunegg every few hours. Nothing is installed without you."
+      },
+      {
+        "key": "updateCheckHours",
+        "type": "integer",
+        "label": "Update check interval (hours)",
+        "min": 1,
+        "max": 168,
+        "step": 1,
+        "defaultValue": 6,
+        "description": ""
+      }
+    ]
+  }
+}

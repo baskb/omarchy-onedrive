@@ -1,0 +1,121 @@
+// node Model.test.js — exercises the journal, status, quota and config parsers.
+const assert = require("assert")
+const M = require("./Model.js")
+
+const p = M.parseMessage("Uploading: Claude/projects/KB365-Website/Input/animation-lab/ratings-log.jsonl ... 50%  |  ETA    00:00:01")
+assert.deepStrictEqual(p, { type: "progress", direction: "upload", path: "Claude/projects/KB365-Website/Input/animation-lab/ratings-log.jsonl", percent: 50, eta: "00:00:01", done: false })
+
+const d = M.parseMessage("Downloading: a b/c ... d.txt ... 95%  |  ETA    --:--:--")
+assert.strictEqual(d.type, "progress")
+assert.strictEqual(d.path, "a b/c ... d.txt")
+assert.strictEqual(d.percent, 95)
+
+const done = M.parseMessage("Uploading: x/y.bin ... 100% | DONE in 00:00:02")
+assert.strictEqual(done.type, "progress")
+assert.strictEqual(done.done, true)
+assert.strictEqual(done.percent, 100)
+
+assert.deepStrictEqual(M.parseMessage("Uploading modified file: Claude/projects/KB365-Website/PROGRESS.md ... done"),
+  { type: "finished", direction: "upload", path: "Claude/projects/KB365-Website/PROGRESS.md", ok: true })
+assert.deepStrictEqual(M.parseMessage("Uploading new file: a/b.txt ... done"),
+  { type: "finished", direction: "upload", path: "a/b.txt", ok: true })
+assert.deepStrictEqual(M.parseMessage("Downloading file: Claude/skills/synced/x/manifest.json ... failed!"),
+  { type: "finished", direction: "download", path: "Claude/skills/synced/x/manifest.json", ok: false })
+assert.deepStrictEqual(M.parseMessage("Downloading file: a.png ... done"), { type: "finished", direction: "download", path: "a.png", ok: true })
+
+assert.deepStrictEqual(M.parseMessage("New items to upload to Microsoft OneDrive: 3"), { type: "pending", direction: "upload", count: 3 })
+assert.deepStrictEqual(M.parseMessage("Starting a sync with Microsoft OneDrive"), { type: "cycleStart" })
+assert.deepStrictEqual(M.parseMessage("Sync with Microsoft OneDrive is complete"), { type: "cycleEnd", interrupted: false })
+assert.deepStrictEqual(M.parseMessage("Sync with Microsoft OneDrive was interrupted (SIGTERM) before completion"), { type: "cycleEnd", interrupted: true })
+assert.deepStrictEqual(M.parseMessage("Syncing changes from Microsoft OneDrive ..."), { type: "phase", phase: "remote" })
+assert.deepStrictEqual(M.parseMessage("Processing 12 applicable JSON items received from Microsoft OneDrive ."), { type: "phase", phase: "scan" })
+assert.deepStrictEqual(M.parseMessage("ERROR: Microsoft OneDrive API returned an error with the following message:"), { type: "error", text: "Microsoft OneDrive API returned an error with the following message:" })
+assert.strictEqual(M.parseMessage("Successfully reached the Microsoft OneDrive Service"), null)
+assert.strictEqual(M.parseMessage("NOTE: This error requires attention"), null)
+// Markup-shaped file names stay plain strings for the PlainText sinks.
+assert.strictEqual(M.parseMessage('Uploading new file: <img src="https://x/t"> ... done').path, '<img src="https://x/t">')
+
+const line = M.parseJournalLine('{"MESSAGE":"Downloading file: a.mp3 ... done","__REALTIME_TIMESTAMP":"1793875514987079","_PID":"5144","__CURSOR":"s=1;i=2"}')
+assert.deepStrictEqual(line, { message: "Downloading file: a.mp3 ... done", tsMs: 1793875514987, cursor: "s=1;i=2" })
+assert.deepStrictEqual(M.parseJournalLine('{"MESSAGE":"x"}'), { message: "x", tsMs: 0, cursor: "" })
+assert.strictEqual(M.parseJournalLine('{"MESSAGE":[1,2]}'), null)
+assert.strictEqual(M.parseJournalLine("not json"), null)
+
+const status = M.parseStatus('{"process":{"state":"idle"},"sync":{"last_successful_sync_at":"2026-11-05T10:19:26.1173772Z"}}')
+assert.strictEqual(status.process.state, "idle")
+assert.strictEqual(M.parseStatus("{bad"), null)
+assert.strictEqual(M.parseIsoMs("2026-11-05T10:19:26.1173772Z"), Date.parse("2026-11-05T10:19:26.117Z"))
+assert.strictEqual(M.parseIsoMs(""), 0)
+
+const q = M.parseQuota("Deleted:   8.90 GB (9556750793 bytes)\nRemaining: 919.40 GB (987196940545 bytes)\nState:     normal\nTotal:     1024.00 GB (1099511627776 bytes)\nUsed:      95.70 GB (102757936438 bytes)\n")
+assert.deepStrictEqual(q, { used: 102757936438, total: 1099511627776, remaining: 987196940545, deleted: 9556750793, state: "normal", ok: true })
+assert.strictEqual(M.parseQuota("nothing").ok, false)
+
+assert.strictEqual(M.parseSyncDir('sync_dir = "~/OneDrive"\nskip_dotfiles = "false"', "/home/b"), "/home/b/OneDrive")
+assert.strictEqual(M.parseSyncDir('sync_dir = "/data/od/"', "/home/b"), "/data/od")
+assert.strictEqual(M.parseSyncDir("", "/home/b"), "/home/b/OneDrive")
+
+assert.strictEqual(M.fileName("a/b/c.txt"), "c.txt")
+assert.strictEqual(M.folderOf("a/b/c.txt"), "a/b")
+assert.strictEqual(M.folderOf("c.txt"), "/")
+assert.strictEqual(M.formatBytes(102757936438), "103 GB")
+assert.strictEqual(M.formatBytes(1536), "1.54 KB")
+assert.strictEqual(M.shortEta("00:00:05"), "5s")
+assert.strictEqual(M.shortEta("00:02:05"), "2m 5s")
+assert.strictEqual(M.shortEta("01:02:05"), "1h 2m")
+assert.strictEqual(M.shortEta("--:--:--"), "")
+assert.strictEqual(M.relativeTime(Date.now() - 5 * 60000, Date.now()), "5m ago")
+
+const r1 = M.pushRecent([], { path: "a" }, 2)
+const r2 = M.pushRecent(r1, { path: "b" }, 2)
+const r3 = M.pushRecent(r2, { path: "a", again: true }, 2)
+assert.deepStrictEqual(r3.map(e => e.path), ["a", "b"])
+assert.strictEqual(r3[0].again, true)
+assert.strictEqual(M.pushRecent(r2, { path: "c" }, 2).length, 2)
+
+assert.deepStrictEqual(M.parseMessage("Changed local items to upload to Microsoft OneDrive: 7"), { type: "pending", direction: "upload", count: 7 })
+assert.deepStrictEqual(M.parseMessage("Number of items to download from Microsoft OneDrive: 12709"), { type: "pending", direction: "download", count: 12709 })
+assert.deepStrictEqual(M.parseMessage("Processed 79932 applicable JSON items received from Microsoft OneDrive"), { type: "phase", phase: "scan" })
+
+assert.strictEqual(M.runEstimate(null, 0), null)
+assert.strictEqual(M.runEstimate({ active: true, totalDownload: 0 }, 0), null)
+const t0 = 1000000
+const comps = []
+for (let i = 1; i <= 100; i++) comps.push(t0 + i * 1000)  // one file per second for 100 s
+const est = M.runEstimate({ active: true, startedAtMs: t0, totalDownload: 400, totalUpload: 0, doneDownload: 100, doneUpload: 0, failed: 0, completions: comps }, t0 + 100000)
+assert.strictEqual(est.total, 400)
+assert.strictEqual(est.done, 100)
+assert.strictEqual(est.fraction, 0.25)
+assert.ok(Math.abs(est.rate - 1) < 0.01, "rate ~1/s got " + est.rate)
+assert.ok(Math.abs(est.remainingSec - 300) < 5, "remaining ~300 s got " + est.remainingSec)
+assert.strictEqual(est.finished, false)
+// Thin window: falls back to the overall average.
+const est2 = M.runEstimate({ active: true, startedAtMs: t0, totalDownload: 10, totalUpload: 0, doneDownload: 2, doneUpload: 0, failed: 0, completions: [t0 + 5000, t0 + 10000] }, t0 + 10000)
+assert.ok(Math.abs(est2.rate - 0.2) < 0.01)
+assert.ok(Math.abs(est2.remainingSec - 40) < 1)
+const est3 = M.runEstimate({ active: true, startedAtMs: t0, totalDownload: 2, totalUpload: 0, doneDownload: 2, doneUpload: 0, failed: 0, completions: [] }, t0 + 1000)
+assert.strictEqual(est3.finished, true)
+assert.strictEqual(est3.remainingSec, -1)
+assert.strictEqual(M.formatDuration(30), "<1 min")
+assert.strictEqual(M.formatDuration(754), "13 min")
+assert.strictEqual(M.formatDuration(3900), "1 h 05 min")
+assert.strictEqual(M.formatDuration(-1), "")
+
+assert.strictEqual(M.boolValue(true, false), true)
+assert.strictEqual(M.boolValue("false", true), false)
+assert.strictEqual(M.boolValue("1", false), true)
+assert.strictEqual(M.boolValue(undefined, true), true)
+assert.strictEqual(M.boolValue("garbage", false), false)
+assert.strictEqual(M.parseVersion("onedrive v2.5.12\nBuilt with ..."), "v2.5.12")
+assert.strictEqual(M.parseVersion(""), "")
+assert.strictEqual(M.summaryLines("Reading configuration file: x\n\nAttempting to contact the Microsoft OneDrive Service\nFetching items ..........\nNo pending changes\n", 3, 200), "Fetching items\nNo pending changes")
+assert.strictEqual(M.summaryLines("a\nb\nc\nd", 2, 200), "c\nd")
+assert.strictEqual(M.summaryLines("<img src=x>" + "y".repeat(300), 1, 20).length, 20)
+const upd = M.parseUpdateCheck("installed=2.5.12-1\naur=2.5.13-1\nupstream=v2.5.13\naur_newer=1\nupstream_newer=1\n")
+assert.deepStrictEqual(upd, { installed: "2.5.12-1", aur: "2.5.13-1", upstream: "2.5.13", aurNewer: true, upstreamNewer: true })
+const same = M.parseUpdateCheck("installed=2.5.12-1\naur=2.5.12-1\nupstream=v2.5.12\naur_newer=0\nupstream_newer=0\n")
+assert.strictEqual(same.aurNewer, false); assert.strictEqual(same.upstreamNewer, false)
+assert.strictEqual(M.parseUpdateCheck("installed=\naur=2.5.13-1\n"), null)
+assert.strictEqual(M.parseUpdateCheck("installed=2.5.12-1\naur=\nupstream=\n"), null)
+assert.strictEqual(M.parseUpdateCheck("installed=2.5.12-1\naur=<script>x</script>\nupstream=v2.5.13\nupstream_newer=1").aur, "")
+console.log("Model.test.js: all assertions passed")
