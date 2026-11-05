@@ -1,0 +1,540 @@
+#!/bin/bash
+# onedrive-odopen: makes the browser's "Sync" button work on Omarchy.
+#
+# A SharePoint document library or OneDrive page hands its Sync button to an
+# odopen:// URL that only Microsoft's own client knows. Registered as the
+# x-scheme-handler for odopen, this script turns that URL into a second
+# configuration of the OneDrive Client for Linux (abraunegg) with the
+# library's drive_id, signs it in, and starts a user service for it. The
+# OneDrive bar widget lists the result and controls it.
+#
+#   onedrive-odopen 'odopen://sync/?...'   handle a Sync button (in a terminal)
+#   onedrive-odopen list                   JSON of the configured libraries
+#   onedrive-odopen remove <slug>          stop, disable and delete a library
+#   onedrive-odopen parse 'odopen://...'   show what a URL would set up
+#   onedrive-odopen install-handler        register as the odopen:// handler
+#   onedrive-odopen uninstall-handler      drop that registration
+#
+# Each library lives in ~/.config/onedrive-<slug> (config, library.json and
+# the client's own state), syncs to ~/SharePoint/<Site - Library>, and runs
+# as the user unit onedrive-<slug>.service.
+
+set -u
+
+SELF="$(readlink -f "$0")"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-onedrive"
+LOG="$STATE_DIR/odopen.log"
+MAIN_CONFDIR="$CONFIG_HOME/onedrive"
+UNIT_DIR="$CONFIG_HOME/systemd/user"
+LIBRARY_ROOT="$HOME/SharePoint"
+DESKTOP_ID="omarchy-onedrive-odopen.desktop"
+DESKTOP_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$DESKTOP_ID"
+WIDGET="baskb.onedrive"
+
+GUID_SHAPE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+DRIVE_ID_SHAPE='^b![A-Za-z0-9_-]{60,70}$'
+SLUG_SHAPE='^[a-z0-9][a-z0-9-]{0,48}$'
+
+log() {
+  mkdir -p "$STATE_DIR"
+  printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null
+}
+
+say() { printf '%s\n' "$*"; }
+warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+fail() { printf '\033[31m%s\033[0m\n' "$*" >&2; log "ERROR $*"; }
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+notify() {
+  command -v notify-send >/dev/null && notify-send -a OneDrive -u normal "OneDrive" "$*" 2>/dev/null
+  return 0
+}
+
+# Re-runs this invocation inside a terminal when there is none, so the user
+# can follow along and the client's sign-in can talk to them.
+need_terminal() {
+  if [ ! -t 1 ]; then
+    if command -v omarchy-launch-tui >/dev/null; then
+      exec omarchy-launch-tui --app-id=org.omarchy.onedrive-sync "$SELF" "$@"
+    fi
+    exec xdg-terminal-exec -e "$SELF" "$@"
+  fi
+}
+
+pause_before_close() {
+  echo
+  read -r -p 'Press Enter to close'
+}
+
+# ---------------------------------------------------------------- url parsing
+
+# Percent-decoding; a plus is a space in query strings. Backslashes are
+# escaped first so printf %b does not interpret them.
+urldecode() {
+  local s="${1//+/ }"
+  s="${s//\\/\\\\}"
+  printf '%b' "${s//%/\\x}"
+}
+
+declare -A Q=()
+
+# Fills Q from an odopen URL. Returns 1 if it is not an odopen sync link.
+parse_odopen() {
+  local url="$1" action rest pair key value
+  Q=()
+  [[ "$url" =~ ^odopen://([A-Za-z]+)/?(\?(.*))?$ ]] || return 1
+  action="${BASH_REMATCH[1],,}"
+  rest="${BASH_REMATCH[3]:-}"
+  Q[action]="$action"
+  IFS='&' read -r -a pairs <<<"$rest"
+  for pair in "${pairs[@]}"; do
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    [ "$key" = "$pair" ] && value=""
+    [[ "$key" =~ ^[A-Za-z][A-Za-z0-9_]{0,40}$ ]] || continue
+    Q["$key"]="$(urldecode "$value" | tr -d '\000-\037\177')"
+  done
+  return 0
+}
+
+# A SharePoint GUID as the Sync button sends it: braces, any case.
+clean_guid() {
+  local g="${1//[\{\}]/}"
+  g="${g,,}"
+  [[ "$g" =~ $GUID_SHAPE ]] && printf '%s' "$g"
+}
+
+# The 16 bytes of a GUID as .NET's Guid.ToByteArray writes them: the first
+# three groups little-endian, the rest as printed. Printed as hex.
+guid_hex_bytes() {
+  local g="${1//-/}"
+  printf '%s%s%s%s%s%s%s%s%s' \
+    "${g:6:2}" "${g:4:2}" "${g:2:2}" "${g:0:2}" \
+    "${g:10:2}" "${g:8:2}" \
+    "${g:14:2}" "${g:12:2}" \
+    "${g:16:16}"
+}
+
+# A SharePoint drive id is "b!" followed by the URL-safe base64 of the site,
+# web and list GUIDs (48 bytes, so no padding).
+compute_drive_id() {
+  local hex
+  hex="$(guid_hex_bytes "$1")$(guid_hex_bytes "$2")$(guid_hex_bytes "$3")"
+  printf 'b!%s' "$(printf "$(sed 's/../\\x&/g' <<<"$hex")" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+}
+
+# A display name safe for a folder: no path separators or control
+# characters, single spaces, bounded.
+clean_name() {
+  local s
+  s="$(printf '%s' "$1" | tr -d '\000-\037\177' | tr '/\\:' '---' | sed -E 's/[[:space:]]+/ /g; s/^[ .]+//; s/[ .]+$//')"
+  printf '%s' "${s:0:60}"
+}
+
+# A folder-and-unit-safe slug.
+slugify() {
+  local s
+  s="$(printf '%s' "$1" | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null || printf '%s' "$1")"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed -E 's/^-+//; s/-+$//')"
+  s="${s:0:40}"
+  s="${s%-}"
+  [ -n "$s" ] || s="library"
+  printf '%s' "$s"
+}
+
+host_of() {
+  local u="${1#https://}"
+  u="${u#http://}"
+  printf '%s' "${u%%/*}"
+}
+
+# --------------------------------------------------------- the main account
+
+MAIN_TOKEN=""
+MAIN_UPN=""
+MAIN_DRIVE_ID=""
+
+# An access token from the already signed-in main configuration. Printing it
+# is a no-sync operation of the client, so it works while the service runs.
+# The token stays in this process; it is passed to curl on stdin.
+main_token() {
+  [ -s "$MAIN_CONFDIR/refresh_token" ] || return 1
+  MAIN_TOKEN="$(timeout 60 onedrive --confdir="$MAIN_CONFDIR" --print-access-token 2>/dev/null | grep -oE 'eyJ[A-Za-z0-9_.-]{80,}' | head -1)"
+  [ -n "$MAIN_TOKEN" ]
+}
+
+graph_get() {
+  printf 'header = "Authorization: Bearer %s"\n' "$MAIN_TOKEN" | curl -fsS --max-time 25 --max-filesize 200000 -K - "$1" 2>/dev/null
+}
+
+jwt_claim() {
+  local payload pad
+  payload="$(cut -d. -f2 <<<"$MAIN_TOKEN" | tr '_-' '/+')"
+  pad=$(( (4 - ${#payload} % 4) % 4 ))
+  printf '%s%s' "$payload" "$(printf '=%.0s' $(seq 1 $pad) 2>/dev/null)" | base64 -d 2>/dev/null | jq -r "$1 // empty" 2>/dev/null
+}
+
+# ------------------------------------------------------------- the registry
+
+# Every ~/.config/onedrive-<slug>/config is a library; library.json holds
+# what the Sync button told us, when it was set up this way.
+library_dirs() {
+  local d
+  for d in "$CONFIG_HOME"/onedrive-*/; do
+    [ -f "$d/config" ] && printf '%s\n' "${d%/}"
+  done
+}
+
+config_value() {
+  sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"?([^\"]*)\"?[[:space:]]*$/\1/p" "$1/config" 2>/dev/null | tail -1
+}
+
+expand_home() {
+  local p="$1"
+  case "$p" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s%s' "$HOME" "${p:1}" ;;
+    *) printf '%s' "$p" ;;
+  esac
+}
+
+# JSON array of libraries with their unit and monitor state.
+cmd_list() {
+  local d slug unit meta name sync_dir web_url drive_id active enabled exists status_json first=1
+  printf '['
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    slug="${d##*/onedrive-}"
+    [[ "$slug" =~ $SLUG_SHAPE ]] || continue
+    unit="onedrive-$slug"
+    meta="$d/library.json"
+    name=""; web_url=""; drive_id=""
+    if [ -s "$meta" ]; then
+      name="$(jq -r '.name // empty' "$meta" 2>/dev/null)"
+      web_url="$(jq -r '.webUrl // empty' "$meta" 2>/dev/null)"
+    fi
+    drive_id="$(config_value "$d" drive_id)"
+    sync_dir="$(expand_home "$(config_value "$d" sync_dir)")"
+    [ -n "$name" ] || name="${sync_dir##*/}"
+    [ -n "$name" ] || name="$slug"
+    active="$(systemctl --user is-active "$unit" 2>/dev/null)"
+    enabled="$(systemctl --user is-enabled "$unit" 2>/dev/null)"
+    if systemctl --user list-unit-files "$unit.service" --no-legend 2>/dev/null | grep -q .; then exists=true; else exists=false; fi
+    status_json='null'
+    [ -s "$d/monitor-status.json" ] && status_json="$(jq -c '{state: (.process.state // ""), lastSync: (.sync.last_successful_sync_at // ""), lastResult: (.sync.last_cycle.result // ""), failures: ((.sync.last_cycle.download_failures // 0) + (.sync.last_cycle.upload_failures // 0)), reachability: (.conditions.onedrive_reachability // ""), cycleStartedAt: (.process.current_cycle_started_at // ""), updatedAt: (.updated_at // "")}' "$d/monitor-status.json" 2>/dev/null || printf 'null')"
+    [ $first = 1 ] || printf ','
+    first=0
+    jq -cn --arg slug "$slug" --arg name "$name" --arg unit "$unit" --arg confDir "$d" --arg syncDir "$sync_dir" \
+      --arg webUrl "$web_url" --arg driveId "$drive_id" --arg active "${active:-unknown}" --arg enabled "${enabled:-unknown}" \
+      --argjson unitExists "$exists" --argjson status "$status_json" \
+      '{slug: $slug, name: $name, unit: $unit, confDir: $confDir, syncDir: $syncDir, webUrl: $webUrl, driveId: $driveId, active: ($active == "active" or $active == "activating" or $active == "reloading"), activeState: $active, enabled: ($enabled == "enabled"), unitExists: $unitExists, status: $status}'
+  done < <(library_dirs)
+  printf ']\n'
+}
+
+find_library_by_drive_id() {
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    [ "$(config_value "$d" drive_id)" = "$1" ] && { printf '%s' "$d"; return 0; }
+  done < <(library_dirs)
+  return 1
+}
+
+# ------------------------------------------------------------------ handler
+
+write_unit() {
+  local unit="$1" confdir="$2" name="$3"
+  mkdir -p "$UNIT_DIR"
+  cat >"$UNIT_DIR/$unit.service" <<EOF
+[Unit]
+Description=OneDrive Client for Linux: $name
+Documentation=https://github.com/abraunegg/onedrive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/bin/sh -c 'sleep 10'
+ExecStart=/usr/bin/onedrive --monitor --confdir=$confdir
+Restart=on-failure
+RestartSec=3
+# A --resync is required; the client exits with EX_CONFIG (78). Do not loop.
+RestartPreventExitStatus=78
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+# What a URL would set up, as key=value lines. Used by `parse` and the handler.
+derive() {
+  local url="$1"
+  parse_odopen "$url" || { fail "Not an odopen:// link: $url"; return 1; }
+  if [ "${Q[action]}" != "sync" ]; then
+    fail "Only the Sync button is supported (this link is odopen://${Q[action]})"
+    return 1
+  fi
+  SITE_ID="$(clean_guid "${Q[siteId]:-}")"
+  WEB_ID="$(clean_guid "${Q[webId]:-}")"
+  LIST_ID="$(clean_guid "${Q[listId]:-}")"
+  WEB_URL="${Q[webUrl]:-}"
+  if [ -z "$SITE_ID" ] || [ -z "$WEB_ID" ] || [ -z "$LIST_ID" ]; then
+    fail "The link is missing the site, web or list id"
+    return 1
+  fi
+  if ! [[ "$WEB_URL" =~ ^https://[A-Za-z0-9.-]+(/[^[:space:]\"\'\<\>]*)?$ ]]; then
+    fail "The link has no usable site URL"
+    return 1
+  fi
+  WEB_URL="${WEB_URL%/}"
+  HOST="$(host_of "$WEB_URL")"
+  WEB_TITLE="$(clean_name "${Q[webTitle]:-}")"
+  LIST_TITLE="$(clean_name "${Q[listTitle]:-}")"
+  [ -n "$WEB_TITLE" ] || WEB_TITLE="$(clean_name "${WEB_URL##*/}")"
+  [ -n "$WEB_TITLE" ] || WEB_TITLE="$HOST"
+  [ -n "$LIST_TITLE" ] || LIST_TITLE="Documents"
+  USER_EMAIL="${Q[userEmail]:-}"
+  [[ "$USER_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] || USER_EMAIL=""
+  NAME="$WEB_TITLE - $LIST_TITLE"
+  SLUG="$(slugify "$NAME")"
+  COMPUTED_ID="$(compute_drive_id "$SITE_ID" "$WEB_ID" "$LIST_ID")"
+  PERSONAL=0
+  case "$HOST" in *-my.sharepoint.com) PERSONAL=1 ;; esac
+  return 0
+}
+
+cmd_parse() {
+  derive "$1" || exit 1
+  printf 'name=%s\nslug=%s\nhost=%s\nwebUrl=%s\nsiteId=%s\nwebId=%s\nlistId=%s\nuserEmail=%s\npersonal=%s\ncomputedDriveId=%s\nconfDir=%s\nsyncDir=%s\nunit=%s\n' \
+    "$NAME" "$SLUG" "$HOST" "$WEB_URL" "$SITE_ID" "$WEB_ID" "$LIST_ID" "$USER_EMAIL" "$PERSONAL" "$COMPUTED_ID" \
+    "$CONFIG_HOME/onedrive-$SLUG" "$LIBRARY_ROOT/$NAME" "onedrive-$SLUG"
+}
+
+cmd_sync() {
+  local url="$1"
+  need_terminal "$url"
+  trap pause_before_close EXIT
+  log "sync $url"
+
+  bold "OneDrive for Omarchy: Sync button"
+  echo
+  if ! command -v onedrive >/dev/null; then
+    fail "The OneDrive Client for Linux is not installed. Install it with: omarchy pkg aur add onedrive-abraunegg"
+    exit 1
+  fi
+  derive "$url" || exit 1
+
+  say "Library:  $NAME"
+  say "Site:     $WEB_URL"
+  [ -n "$USER_EMAIL" ] && say "Account:  $USER_EMAIL"
+  echo
+
+  # Ask the signed-in main account about this library: the authoritative
+  # drive id, and whether it is simply the user's own OneDrive.
+  local drive_id="" graph_json="" graph_id=""
+  if main_token; then
+    MAIN_UPN="$(jwt_claim '.upn // .preferred_username // .unique_name')"
+    graph_json="$(graph_get "https://graph.microsoft.com/v1.0/sites/$HOST,$SITE_ID,$WEB_ID/lists/$LIST_ID/drive?\$select=id,name,webUrl")"
+    graph_id="$(jq -r '.id // empty' <<<"$graph_json" 2>/dev/null)"
+    [[ "$graph_id" =~ $DRIVE_ID_SHAPE ]] || graph_id=""
+    MAIN_DRIVE_ID="$(graph_get 'https://graph.microsoft.com/v1.0/me/drive?$select=id' | jq -r '.id // empty' 2>/dev/null)"
+    if [ -n "$graph_id" ]; then
+      if [ "$graph_id" != "$COMPUTED_ID" ]; then
+        log "WARN drive id mismatch computed=$COMPUTED_ID graph=$graph_id"
+      else
+        log "drive id confirmed $graph_id"
+      fi
+      drive_id="$graph_id"
+    else
+      log "graph lookup gave nothing (other tenant, or no access); using computed id"
+    fi
+  else
+    log "no main token; using computed id"
+  fi
+  [ -n "$drive_id" ] || drive_id="$COMPUTED_ID"
+  MAIN_TOKEN=""
+
+  if [ -n "$MAIN_DRIVE_ID" ] && [ "$drive_id" = "$MAIN_DRIVE_ID" ]; then
+    say "This is your own OneDrive, which the main onedrive service already syncs to $(expand_home "$(config_value "$MAIN_CONFDIR" sync_dir)")."
+    notify "That is your own OneDrive; it is already syncing."
+    exit 0
+  fi
+
+  local existing
+  if existing="$(find_library_by_drive_id "$drive_id")"; then
+    local dir
+    dir="$(expand_home "$(config_value "$existing" sync_dir)")"
+    say "This library is already set up: $existing"
+    say "It syncs to $dir"
+    notify "Already syncing: $NAME"
+    [ -d "$dir" ] && (setsid uwsm-app -- xdg-open "$dir" >/dev/null 2>&1 &)
+    exit 0
+  fi
+
+  if [ -n "$MAIN_UPN" ] && [ -n "$USER_EMAIL" ] && [ "${MAIN_UPN,,}" != "${USER_EMAIL,,}" ]; then
+    warn "The browser was signed in as $USER_EMAIL; this computer's main OneDrive is $MAIN_UPN."
+    warn "Sign in as $USER_EMAIL when the browser asks."
+    echo
+  fi
+
+  local slug="$SLUG" confdir="$CONFIG_HOME/onedrive-$SLUG" n=2
+  while [ -e "$confdir" ]; do
+    slug="$SLUG-$n"
+    confdir="$CONFIG_HOME/onedrive-$slug"
+    n=$((n + 1))
+  done
+  local unit="onedrive-$slug" sync_dir="$LIBRARY_ROOT/$NAME"
+  n=2
+  while [ -e "$sync_dir" ]; do
+    sync_dir="$LIBRARY_ROOT/$NAME ($n)"
+    n=$((n + 1))
+  done
+
+  say "Config:   $confdir"
+  say "Folder:   $sync_dir"
+  say "Service:  $unit"
+  say "drive_id: $drive_id"
+  echo
+
+  local whole
+  read -r -p 'Sync the whole library? [Y/n] ' whole
+  whole="${whole:-Y}"
+
+  mkdir -p "$confdir" "$sync_dir" || { fail "Could not create $confdir or $sync_dir"; exit 1; }
+  chmod 700 "$confdir"
+  {
+    printf '# %s\n# Set up by OneDrive for Omarchy from the browser Sync button on %s\n# %s\n' "$NAME" "$(date -I)" "$WEB_URL"
+    printf 'sync_dir = "%s"\n' "${sync_dir/#$HOME/\~}"
+    printf 'drive_id = "%s"\n' "$drive_id"
+    printf 'skip_dir = ".git|node_modules|__pycache__"\n'
+  } >"$confdir/config"
+  jq -n --arg name "$NAME" --arg webUrl "$WEB_URL" --arg webTitle "$WEB_TITLE" --arg listTitle "$LIST_TITLE" \
+    --arg userEmail "$USER_EMAIL" --arg driveId "$drive_id" --arg computedDriveId "$COMPUTED_ID" \
+    --arg siteId "$SITE_ID" --arg webId "$WEB_ID" --arg listId "$LIST_ID" --arg syncDir "$sync_dir" --arg created "$(date -Is)" \
+    '{name: $name, webUrl: $webUrl, webTitle: $webTitle, listTitle: $listTitle, userEmail: $userEmail, driveId: $driveId, computedDriveId: $computedDriveId, siteId: $siteId, webId: $webId, listId: $listId, syncDir: $syncDir, created: $created}' \
+    >"$confdir/library.json"
+
+  if [[ "$whole" =~ ^[Nn] ]]; then
+    cat >"$confdir/sync_list" <<'EOF'
+# One folder or file per line, relative to the library root. A leading / anchors
+# at the root, a leading ! or - excludes. Everything not listed is left online.
+# Example:
+# /General/
+# /Projects/2026/
+EOF
+    say "Opening sync_list in your editor; save and quit to continue."
+    "${EDITOR:-nvim}" "$confdir/sync_list"
+  fi
+
+  echo
+  bold "Signing in"
+  say "The client opens a browser to sign in to this library."
+  [ -n "$USER_EMAIL" ] && say "Use the account $USER_EMAIL."
+  echo
+  if ! onedrive --confdir="$confdir" --display-quota; then
+    echo
+    fail "Sign-in or the library check failed. Nothing is running."
+    say "Fix it and try: onedrive --confdir=\"$confdir\" --display-quota"
+    say "Or remove it: $SELF remove $slug"
+    exit 1
+  fi
+
+  echo
+  write_unit "$unit" "$confdir" "$NAME"
+  systemctl --user daemon-reload
+  if systemctl --user enable --now "$unit"; then
+    log "started $unit for $drive_id -> $sync_dir"
+    bold "Done. $NAME syncs to $sync_dir"
+    say "The OneDrive widget in the bar lists it under Libraries."
+    notify "Syncing $NAME to ${sync_dir/#$HOME/\~}"
+    omarchy-shell "$WIDGET" rescan >/dev/null 2>&1 || true
+  else
+    fail "systemctl could not start $unit. See: journalctl --user -u $unit"
+    exit 1
+  fi
+}
+
+cmd_remove() {
+  local slug="$1"
+  [[ "$slug" =~ $SLUG_SHAPE ]] || { fail "Bad library name: $slug"; exit 1; }
+  local confdir="$CONFIG_HOME/onedrive-$slug" unit="onedrive-$slug"
+  [ -d "$confdir" ] || { fail "No library at $confdir"; exit 1; }
+  need_terminal remove "$slug"
+  trap pause_before_close EXIT
+  local name sync_dir answer
+  name="$(jq -r '.name // empty' "$confdir/library.json" 2>/dev/null)"
+  [ -n "$name" ] || name="$slug"
+  sync_dir="$(expand_home "$(config_value "$confdir" sync_dir)")"
+  bold "Remove library: $name"
+  say "Service: $unit"
+  say "Config:  $confdir"
+  say "Folder:  $sync_dir"
+  echo
+  read -r -p 'Stop syncing and remove this library from this computer? [y/N] ' answer
+  [[ "$answer" =~ ^[Yy] ]] || { say "Nothing changed."; exit 0; }
+  systemctl --user disable --now "$unit" 2>/dev/null
+  rm -f "$UNIT_DIR/$unit.service"
+  systemctl --user daemon-reload
+  rm -rf "$confdir"
+  log "removed $unit ($confdir)"
+  if [ -n "$sync_dir" ] && [ -d "$sync_dir" ] && [ "$sync_dir" != "$HOME" ]; then
+    echo
+    read -r -p "Also delete the local folder $sync_dir? The files stay online. [y/N] " answer
+    if [[ "$answer" =~ ^[Yy] ]]; then
+      rm -rf "$sync_dir"
+      say "Deleted $sync_dir"
+    else
+      say "Kept $sync_dir"
+    fi
+  fi
+  notify "Stopped syncing $name"
+  omarchy-shell "$WIDGET" rescan >/dev/null 2>&1 || true
+  bold "Done."
+}
+
+cmd_install_handler() {
+  local wanted current=""
+  wanted="$(cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=OneDrive for Omarchy (Sync button)
+Comment=Sets up a SharePoint or OneDrive library from the browser's Sync button
+Exec="$SELF" %u
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/odopen;
+EOF
+)"
+  [ -f "$DESKTOP_FILE" ] && current="$(cat "$DESKTOP_FILE")"
+  if [ "$current" != "$wanted" ]; then
+    mkdir -p "$(dirname "$DESKTOP_FILE")"
+    printf '%s\n' "$wanted" >"$DESKTOP_FILE"
+  fi
+  chmod +x "$SELF" 2>/dev/null
+  if [ "$(xdg-mime query default x-scheme-handler/odopen 2>/dev/null)" != "$DESKTOP_ID" ]; then
+    xdg-mime default "$DESKTOP_ID" x-scheme-handler/odopen
+  fi
+  command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$DESKTOP_FILE")" 2>/dev/null
+  printf 'handler=%s\n' "$(xdg-mime query default x-scheme-handler/odopen 2>/dev/null)"
+}
+
+cmd_uninstall_handler() {
+  rm -f "$DESKTOP_FILE"
+  local list="$CONFIG_HOME/mimeapps.list"
+  [ -f "$list" ] && sed -i "/^x-scheme-handler\/odopen=$DESKTOP_ID\$/d" "$list"
+  command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$DESKTOP_FILE")" 2>/dev/null
+  printf 'handler=%s\n' "$(xdg-mime query default x-scheme-handler/odopen 2>/dev/null)"
+}
+
+case "${1:-}" in
+  list) cmd_list ;;
+  parse) [ $# -ge 2 ] || { fail "usage: onedrive-odopen parse 'odopen://...'"; exit 2; }; cmd_parse "$2" ;;
+  remove) [ $# -ge 2 ] || { fail "usage: onedrive-odopen remove <slug>"; exit 2; }; cmd_remove "$2" ;;
+  install-handler) cmd_install_handler ;;
+  uninstall-handler) cmd_uninstall_handler ;;
+  odopen://*) cmd_sync "$1" ;;
+  "") sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) fail "Unknown argument: $1"; exit 2 ;;
+esac

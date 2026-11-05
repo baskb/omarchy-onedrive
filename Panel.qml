@@ -23,6 +23,7 @@ Panel {
   // Items inside the panel's lazily built content, null until it first opens.
   readonly property Item panelFlick: panel.loadedContent ? panel.loadedContent.panelFlick : null
   readonly property Item fileColumn: panel.loadedContent ? panel.loadedContent.fileColumn : null
+  readonly property Item libraryColumn: panel.loadedContent ? panel.loadedContent.libraryColumn : null
   readonly property Item settingsColumn: panel.loadedContent ? panel.loadedContent.settingsColumn : null
 
   // A setting changed in the panel shows at once; the bar hands the saved
@@ -69,6 +70,11 @@ Panel {
     { key: "recentLimit", type: "int", def: 12, min: 1, max: 50, step: 1 },
     { key: "showActions", type: "bool", def: true },
     { key: "notifyOnFailure", type: "bool", def: true },
+    { key: "sharepoint", type: "header" },
+    { key: "handleSyncButton", type: "bool", def: true },
+    { key: "showLibraries", type: "bool", def: true },
+    { key: "openLibraryRoot", type: "action", glyph: "󰉋" },
+    { key: "syncHandler", type: "info" },
     { key: "client", type: "header" },
     { key: "startAtLogin", type: "system", def: true },
     { key: "checkUpdates", type: "bool", def: true },
@@ -90,11 +96,13 @@ Panel {
   readonly property bool showStorage: optBool("showStorage", false)
   readonly property bool showRecent: optBool("showRecent", true)
   readonly property bool showActions: optBool("showActions", true)
+  readonly property bool showLibraries: optBool("showLibraries", true)
 
   property bool settingsOpen: false
-  property string focusSection: "header"   // header | actions | files | settings
+  property string focusSection: "header"   // header | actions | libraries | files | settings
   property int headerIndex: 0              // 0 pause switch, 1 gear
   property int actionIndex: 0
+  property int libraryIndex: 0
   property int fileIndex: 0
   property int settingIndex: 1
   property bool cursorActive: false
@@ -112,6 +120,8 @@ Panel {
   }
   readonly property int actionCount: actions.length
   readonly property bool actionsShown: showActions && onedrive.installed
+  readonly property bool librariesShown: showLibraries && onedrive.libraries.length > 0
+  readonly property int libraryCount: onedrive.libraries.length
   readonly property bool filesShown: showRecent && onedrive.recent.length > 0
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
@@ -121,8 +131,8 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property string state: onedrive.state
-  readonly property bool syncing: state === "syncing"
-  readonly property bool attention: state === "degraded" || state === "offline" || onedrive.lastError !== ""
+  readonly property bool syncing: state === "syncing" || onedrive.librariesSyncing
+  readonly property bool attention: state === "degraded" || state === "offline" || onedrive.lastError !== "" || onedrive.librariesAttention
   readonly property color iconColor: onedrive.active ? foreground : dim
   readonly property color barIconColor: onedrive.active ? barForeground : Qt.darker(barForeground, 1.55)
   readonly property bool headerHasCursor: cursorActive && focusSection === "header" && onedrive.installed
@@ -193,6 +203,35 @@ Panel {
   readonly property string folderText: onedrive.syncDir.indexOf(homeDir) === 0
     ? "~" + onedrive.syncDir.substring(homeDir.length) : onedrive.syncDir
 
+  // The settings view's "Sync button" line: which handler owns odopen://.
+  readonly property string syncHandlerText: {
+    var h = onedrive.syncHandler
+    if (h === "omarchy-onedrive-odopen.desktop") return strings.t("handler.registered")
+    if (h === "" || h === "?") return onedrive.handleSyncButton ? strings.t("info.loading") : strings.t("handler.none")
+    return strings.t("handler.other").arg(h.replace(/\.desktop$/, ""))
+  }
+
+  // One line under a library's name: its state, and when idle the last sync.
+  function libraryMeta(lib) {
+    var s = Model.libraryState(lib)
+    if (s === "missing") return strings.t("library.noService")
+    if (s === "idle" && lib.lastSyncMs > 0)
+      return strings.t("meta.lastSync").arg(Model.relativeTime(lib.lastSyncMs, nowMs, strings.t, Commons.I18n.formatNumber))
+    var text = strings.t("state." + s)
+    if (s === "degraded" && lib.failures > 0) text += " (" + Commons.I18n.formatNumber(lib.failures) + ")"
+    return text
+  }
+
+  function libraryFolderText(lib) {
+    var d = lib && lib.syncDir ? lib.syncDir : ""
+    return d.indexOf(homeDir) === 0 ? "~" + d.substring(homeDir.length) : d
+  }
+
+  function selectedLibrary() {
+    if (libraryCount === 0) return null
+    return onedrive.libraries[Math.max(0, Math.min(libraryIndex, libraryCount - 1))]
+  }
+
   // ---- keyboard cursor -------------------------------------------------
 
   function settingVisible(index) {
@@ -224,11 +263,37 @@ Panel {
       return
     }
     if (focusSection === "settings") focusSection = "header"
-    if (focusSection === "files" && !filesShown) focusSection = actionsShown ? "actions" : "header"
+    if (focusSection === "files" && !filesShown) focusSection = librariesShown ? "libraries" : (actionsShown ? "actions" : "header")
+    if (focusSection === "libraries" && !librariesShown) focusSection = actionsShown ? "actions" : "header"
     if (focusSection === "actions" && !actionsShown) focusSection = "header"
     if (fileIndex >= onedrive.recent.length) fileIndex = Math.max(0, onedrive.recent.length - 1)
     if (fileIndex < 0) fileIndex = 0
+    libraryIndex = Math.max(0, Math.min(libraryCount - 1, libraryIndex))
     actionIndex = Math.max(0, Math.min(actionCount - 1, actionIndex))
+  }
+
+  // The section below the header, in panel order.
+  function sectionAfter(section) {
+    var order = ["header", "actions", "libraries", "files"]
+    var shown = { header: true, actions: actionsShown, libraries: librariesShown, files: filesShown }
+    for (var i = order.indexOf(section) + 1; i < order.length; i++) if (shown[order[i]]) return order[i]
+    return ""
+  }
+
+  function sectionBefore(section) {
+    var order = ["header", "actions", "libraries", "files"]
+    var shown = { header: true, actions: actionsShown, libraries: librariesShown, files: filesShown }
+    for (var i = order.indexOf(section) - 1; i >= 0; i--) if (shown[order[i]]) return order[i]
+    return "header"
+  }
+
+  function enterSection(section) {
+    if (section === "") return
+    focusSection = section
+    if (section === "header") { headerIndex = 0; if (panelFlick) panelFlick.contentY = 0; return }
+    if (section === "files") fileIndex = 0
+    if (section === "libraries") libraryIndex = 0
+    scrollCursorIntoView()
   }
 
   function moveCursor(dx, dy) {
@@ -241,20 +306,29 @@ Panel {
     }
     if (focusSection === "header") {
       if (dx !== 0) headerIndex = headerIndex === 0 ? 1 : 0
-      else if (dy > 0) {
-        if (actionsShown) focusSection = "actions"
-        else if (filesShown) { focusSection = "files"; fileIndex = 0; scrollCursorIntoView() }
-      }
+      else if (dy > 0) enterSection(sectionAfter("header"))
       return
     }
     if (focusSection === "actions") {
       if (dx !== 0) actionIndex = Math.max(0, Math.min(actionCount - 1, actionIndex + dx))
       else if (dy < 0) setHeaderCursor(0)
-      else if (dy > 0 && filesShown) { focusSection = "files"; fileIndex = 0; scrollCursorIntoView() }
+      else if (dy > 0) enterSection(sectionAfter("actions"))
+      return
+    }
+    if (focusSection === "libraries") {
+      if (dy < 0 && libraryIndex === 0) { enterSection(sectionBefore("libraries")); return }
+      if (dy > 0 && libraryIndex >= libraryCount - 1) { enterSection(sectionAfter("libraries")); return }
+      if (dy !== 0) {
+        libraryIndex = Math.max(0, Math.min(libraryCount - 1, libraryIndex + dy))
+        scrollCursorIntoView()
+      } else if (dx !== 0) {
+        var lib = selectedLibrary()
+        if (lib) onedrive.toggleLibrary(lib.slug)
+      }
       return
     }
     if (focusSection === "files") {
-      if (dy < 0 && fileIndex === 0) { focusSection = actionsShown ? "actions" : "header"; return }
+      if (dy < 0 && fileIndex === 0) { enterSection(sectionBefore("files")); return }
       if (dy !== 0) {
         fileIndex = Math.max(0, Math.min(onedrive.recent.length - 1, fileIndex + dy))
         scrollCursorIntoView()
@@ -279,6 +353,13 @@ Panel {
     cursorActive = true
     focusSection = "files"
     fileIndex = index
+    scrollCursorIntoView()
+  }
+
+  function setLibraryCursor(index) {
+    cursorActive = true
+    focusSection = "libraries"
+    libraryIndex = index
     scrollCursorIntoView()
   }
 
@@ -324,6 +405,7 @@ Panel {
     else if (row.type === "system") onedrive.setStartAtLogin(!onedrive.unitEnabled)
     else if (row.type === "action") {
       if (row.key === "openConfig") onedrive.openConfig()
+      else if (row.key === "openLibraryRoot") onedrive.openLibraryRoot()
       else if (row.key === "openSyncList") onedrive.openSyncList()
       else if (row.key === "reauth") onedrive.reauth()
       else if (row.key === "checkUpdate") onedrive.checkUpdates(true)
@@ -343,6 +425,7 @@ Panel {
     if (focusSection === "settings") activateSetting(settingIndex)
     else if (focusSection === "header") { if (headerIndex === 1) toggleSettings(); else toggleRunning() }
     else if (focusSection === "actions") runAction(actionIndex)
+    else if (focusSection === "libraries") onedrive.openLibraryFolder(selectedLibrary())
     else if (focusSection === "files") onedrive.openFile(selectedFile())
   }
 
@@ -370,6 +453,8 @@ Panel {
   function scrollCursorIntoView() {
     if (focusSection === "files" && fileColumn && fileIndex >= 0 && fileIndex < fileColumn.children.length)
       scrollItemIntoView(fileColumn.children[fileIndex])
+    else if (focusSection === "libraries" && libraryColumn && libraryIndex >= 0 && libraryIndex < libraryColumn.children.length)
+      scrollItemIntoView(libraryColumn.children[libraryIndex])
     else if (focusSection === "settings" && settingsColumn && settingIndex >= 0 && settingIndex < settingsColumn.children.length)
       scrollItemIntoView(settingsColumn.children[settingIndex])
   }
@@ -385,10 +470,13 @@ Panel {
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
     onedrive.refresh()
+    onedrive.librariesFetchedAtMs = 0
+    onedrive.refreshLibraries()
     if (showStorage) onedrive.refreshQuota(false)
     Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
   }
   onFileIndexChanged: scrollCursorIntoView()
+  onLibraryIndexChanged: scrollCursorIntoView()
   onSettingIndexChanged: scrollCursorIntoView()
 
   Service {
@@ -426,6 +514,11 @@ Panel {
     function checkUpdates(): string { onedrive.checkUpdates(true); return "ok" }
     function updates(): string { return root.updateText }
     function status(): string { return onedrive.statusText }
+    function rescan(): string { onedrive.librariesFetchedAtMs = 0; onedrive.refreshLibraries(); return "ok" }
+    function libraries(): string {
+      return onedrive.libraries.map(function(l) { return l.name + ": " + Model.libraryState(l) + " (" + l.unit + ")" }).join("\n")
+    }
+    function add(url: string): string { return onedrive.addLibrary(url) ? "ok" : "not an odopen:// link" }
     function set(key: string, valueJson: string): string {
       try { root.saveSetting(key, JSON.parse(valueJson)); return "ok" } catch (e) { return "invalid value: " + e }
     }
@@ -436,6 +529,8 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     labelText: root.barLabel
+    // The label needs its own room, or the cloud is pushed onto the next widget.
+    slotSize: Style.bar.iconSlot * (root.barLabel !== "" ? 2 : 1)
     tooltipText: root.barTooltip
     iconComponent: Component {
       Item {
@@ -495,6 +590,7 @@ Panel {
       id: keyCatcher
       property alias panelFlick: panelFlick
       property alias fileColumn: fileColumn
+      property alias libraryColumn: libraryColumn
       property alias settingsColumn: settingsColumn
       implicitHeight: column.implicitHeight
       anchors.fill: parent
@@ -895,6 +991,39 @@ Panel {
               }
             }
 
+            PanelSeparator { visible: root.librariesShown; foreground: root.foreground }
+
+            // Extra libraries from the browser's Sync button, each its own
+            // client instance: state, a pause switch and a remove button.
+            Column {
+              visible: root.librariesShown
+              width: parent.width
+              spacing: Style.space(10)
+
+              PanelSectionHeader {
+                text: strings.t("library.title")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Column {
+                id: libraryColumn
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: onedrive.libraries
+                  LibraryRow {
+                    required property var modelData
+                    required property int index
+                    width: libraryColumn.width
+                    lib: modelData
+                    rowIndex: index
+                  }
+                }
+              }
+            }
+
             PanelSeparator { visible: root.showRecent; foreground: root.foreground }
 
             Column {
@@ -1108,7 +1237,106 @@ Panel {
       width: parent.width
       label: strings.t("settings." + settingRow.key)
       value: settingRow.key === "version" ? (onedrive.version !== "" ? onedrive.version : "—")
-        : (settingRow.key === "update" ? root.updateText : "")
+        : (settingRow.key === "update" ? root.updateText
+        : (settingRow.key === "syncHandler" ? root.syncHandlerText : ""))
+    }
+  }
+
+  // One extra library: a small cloud in its state, the name, a status line,
+  // a pause switch and a remove button. Click or Enter opens its folder.
+  component LibraryRow: CursorSurface {
+    id: libraryRow
+    property var lib: null
+    property int rowIndex: 0
+    readonly property string libState: Model.libraryState(lib)
+    readonly property bool libActive: lib ? lib.active : false
+    readonly property bool libBusy: lib ? onedrive.libraryBusySlug === lib.slug : false
+    readonly property bool libAttention: libState === "degraded" || libState === "offline"
+
+    hasCursor: root.cursorActive && root.focusSection === "libraries" && root.libraryIndex === rowIndex
+    foreground: root.foreground
+
+    implicitHeight: libraryContent.implicitHeight + Style.spacing.rowPaddingX
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: root.setLibraryCursor(libraryRow.rowIndex)
+      onClicked: onedrive.openLibraryFolder(libraryRow.lib)
+    }
+
+    RowLayout {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      OneDriveIcon {
+        iconSize: Style.font.icon
+        color: libraryRow.libActive ? root.foreground : root.dim
+        badgeColor: root.urgent
+        crossed: !!(libraryRow.lib && libraryRow.lib.unitExists && !libraryRow.libActive)
+        warning: libraryRow.libAttention
+        pulsing: libraryRow.libState === "syncing"
+        Layout.alignment: Qt.AlignVCenter
+      }
+
+      ColumnLayout {
+        id: libraryContent
+        Layout.fillWidth: true
+        spacing: Style.space(1)
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          text: libraryRow.lib ? libraryRow.lib.name : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideMiddle
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          // The folder is named only when it is not the usual
+          // ~/SharePoint/<name>, which the name line already implies.
+          text: {
+            if (!libraryRow.lib) return ""
+            var meta = root.libraryMeta(libraryRow.lib)
+            var usual = onedrive.libraryRoot + "/" + libraryRow.lib.name
+            return libraryRow.lib.syncDir === usual ? meta : meta + " · " + root.libraryFolderText(libraryRow.lib)
+          }
+          color: libraryRow.libAttention ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      PanelActionButton {
+        iconText: "󰆴"
+        tooltipText: strings.t("library.remove.hint")
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        fontSize: Style.font.subtitle
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setLibraryCursor(libraryRow.rowIndex) }
+        onClicked: if (libraryRow.lib) onedrive.removeLibrary(libraryRow.lib.slug)
+      }
+
+      ToggleSwitch {
+        visible: !!(libraryRow.lib && libraryRow.lib.unitExists)
+        checked: libraryRow.libActive
+        busy: libraryRow.libBusy
+        foreground: root.foreground
+        Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.setLibraryCursor(libraryRow.rowIndex) }
+        onToggled: if (libraryRow.lib) onedrive.toggleLibrary(libraryRow.lib.slug)
+      }
     }
   }
 

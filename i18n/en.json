@@ -121,5 +121,19 @@
   "setting.checkUpdate": "Check for updates now",
   "setting.checkUpdate.hint": "Compare the installed package with the AUR and the upstream release",
   "setting.installUpdate": "Install %1",
-  "setting.installUpdate.hint": "Runs yay in a terminal (asks your password), then restarts the service"
+  "setting.installUpdate.hint": "Runs yay in a terminal (asks your password), then restarts the service",
+  "library.title": "Libraries",
+  "library.noService": "No service",
+  "library.remove.hint": "Stop syncing this library and remove its configuration, in a terminal",
+  "handler.registered": "Registered for odopen:// links",
+  "handler.none": "Not registered",
+  "handler.other": "Handled by %1",
+  "settings.sharepoint": "SharePoint libraries",
+  "settings.syncHandler": "Sync button",
+  "setting.handleSyncButton": "Sync button in the browser",
+  "setting.handleSyncButton.hint": "Pressing Sync on a SharePoint or OneDrive library in the browser sets it up here, in a terminal",
+  "setting.showLibraries": "Libraries in the panel",
+  "setting.showLibraries.hint": "Each extra library with its state, a pause switch and a remove button",
+  "setting.openLibraryRoot": "Open libraries folder",
+  "setting.openLibraryRoot.hint": "~/SharePoint, where every library gets its own folder"
 }

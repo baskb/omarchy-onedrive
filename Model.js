@@ -330,8 +330,68 @@ function escapeMarkup(text) {
   return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
+// A local path from a file:// URL, as Qt.resolvedUrl gives one.
+function pathFromUrl(url) {
+  var s = String(url || "")
+  if (s.indexOf("file://") === 0) s = s.substring(7)
+  try { return decodeURIComponent(s) } catch (e) { return s }
+}
+
+// Output of `onedrive-odopen list`: the extra libraries (SharePoint document
+// libraries and other OneDrives) each with their own client configuration
+// and user unit. Every field is shape-checked, since the JSON is assembled
+// from config files and the client's status file.
+var SLUG_SHAPE = /^[a-z0-9][a-z0-9-]{0,48}$/
+function parseLibraries(text) {
+  var raw
+  try { raw = JSON.parse(String(text || "")) } catch (e) { return null }
+  if (!Array.isArray(raw)) return null
+  var out = []
+  for (var i = 0; i < raw.length; i++) {
+    var l = raw[i]
+    if (!l || typeof l !== "object") continue
+    var slug = String(l.slug || "")
+    if (!SLUG_SHAPE.test(slug)) continue
+    var st = l.status && typeof l.status === "object" ? l.status : {}
+    out.push({
+      slug: slug,
+      name: String(l.name || slug).substring(0, 80),
+      unit: "onedrive-" + slug,
+      confDir: String(l.confDir || ""),
+      syncDir: String(l.syncDir || ""),
+      webUrl: /^https:\/\/[^\s"'<>]+$/.test(String(l.webUrl || "")) ? String(l.webUrl) : "",
+      active: l.active === true,
+      enabled: l.enabled === true,
+      unitExists: l.unitExists !== false,
+      processState: String(st.state || ""),
+      lastSyncMs: parseIsoMs(st.lastSync),
+      lastResult: String(st.lastResult || ""),
+      failures: Number(st.failures) > 0 ? Number(st.failures) : 0,
+      reachability: String(st.reachability || ""),
+      statusUpdatedMs: parseIsoMs(st.updatedAt)
+    })
+  }
+  out.sort(function(a, b) { return a.name.localeCompare(b.name) })
+  return out
+}
+
+// One word per library, like the main service's state.
+function libraryState(lib) {
+  if (!lib || !lib.unitExists) return "missing"
+  if (!lib.active) return "paused"
+  if (lib.processState === "") return "starting"
+  if (lib.reachability === "unreachable") return "offline"
+  if (lib.processState === "syncing") return "syncing"
+  if (lib.processState === "degraded" || lib.lastResult === "partial_failure") return "degraded"
+  if (lib.processState === "idle") return "idle"
+  return "starting"
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    pathFromUrl: pathFromUrl,
+    parseLibraries: parseLibraries,
+    libraryState: libraryState,
     escapeMarkup: escapeMarkup,
     parseUpdateCheck: parseUpdateCheck,
     boolValue: boolValue,

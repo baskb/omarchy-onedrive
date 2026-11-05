@@ -121,5 +121,19 @@
   "setting.checkUpdate": "Nu op updates controleren",
   "setting.checkUpdate.hint": "Vergelijk het geïnstalleerde pakket met de AUR en de upstream-release",
   "setting.installUpdate": "%1 installeren",
-  "setting.installUpdate.hint": "Draait yay in een terminal (vraagt je wachtwoord) en herstart daarna de service"
+  "setting.installUpdate.hint": "Draait yay in een terminal (vraagt je wachtwoord) en herstart daarna de service",
+  "library.title": "Bibliotheken",
+  "library.noService": "Geen service",
+  "library.remove.hint": "Stop met synchroniseren en verwijder de configuratie van deze bibliotheek, in een terminal",
+  "handler.registered": "Geregistreerd voor odopen://-koppelingen",
+  "handler.none": "Niet geregistreerd",
+  "handler.other": "Afgehandeld door %1",
+  "settings.sharepoint": "SharePoint-bibliotheken",
+  "settings.syncHandler": "Sync-knop",
+  "setting.handleSyncButton": "Sync-knop in de browser",
+  "setting.handleSyncButton.hint": "Op Synchroniseren drukken bij een SharePoint- of OneDrive-bibliotheek in de browser zet die hier op, in een terminal",
+  "setting.showLibraries": "Bibliotheken in het paneel",
+  "setting.showLibraries.hint": "Elke extra bibliotheek met status, een pauzeschakelaar en een verwijderknop",
+  "setting.openLibraryRoot": "Bibliothekenmap openen",
+  "setting.openLibraryRoot.hint": "~/SharePoint, waar elke bibliotheek een eigen map krijgt"
 }

@@ -17,6 +17,27 @@ Item {
   readonly property string statusPath: configDir + "/monitor-status.json"
   readonly property string unit: "onedrive"
 
+  // The helper that turns the browser's Sync button (an odopen:// link) into
+  // a second client configuration and user unit, lists those libraries, and
+  // removes them. It ships with the plugin.
+  readonly property string toolPath: Model.pathFromUrl(Qt.resolvedUrl("bin/onedrive-odopen"))
+  readonly property string libraryRoot: home + "/SharePoint"
+
+  // Extra libraries: SharePoint document libraries and other OneDrives, each
+  // with its own ~/.config/onedrive-<slug> and onedrive-<slug>.service.
+  property var libraries: []
+  property bool librariesKnown: false
+  property double librariesFetchedAtMs: 0
+  readonly property bool librariesBusy: librariesProcess.running
+  readonly property bool librariesSyncing: libraries.some(function(l) { return Model.libraryState(l) === "syncing" })
+  readonly property bool librariesAttention: libraries.some(function(l) { var s = Model.libraryState(l); return s === "degraded" || s === "offline" })
+  property string libraryBusySlug: ""
+
+  // Whether this plugin is registered as the odopen:// handler.
+  readonly property bool handleSyncButton: Model.boolValue(setting("handleSyncButton", true), true)
+  property string syncHandler: ""   // the registered desktop id, "" while unknown
+  onHandleSyncButtonChanged: applySyncHandler()
+
   property bool installed: true
   property bool serviceActive: false
 
@@ -158,6 +179,71 @@ Item {
   function refresh() {
     statusFile.reload()
     if (!activeProcess.running) activeProcess.running = true
+    if (Date.now() - librariesFetchedAtMs > 10000) refreshLibraries()
+  }
+
+  // ---- extra libraries -------------------------------------------------
+
+  // A request that lands while a listing runs is honoured right after it,
+  // so a rescan asked by the helper is never lost to the safety poll.
+  property bool librariesAgain: false
+  function refreshLibraries() {
+    if (!installed) return
+    if (librariesProcess.running) { librariesAgain = true; return }
+    librariesProcess.running = true
+  }
+
+  function libraryBySlug(slug) {
+    for (var i = 0; i < libraries.length; i++) if (libraries[i].slug === slug) return libraries[i]
+    return null
+  }
+
+  // start | stop | restart on a library's own unit, then a short settle poll.
+  function libraryControl(slug, verb) {
+    var lib = libraryBySlug(slug)
+    if (!lib || libraryControlProcess.running) return
+    if (verb !== "start" && verb !== "stop" && verb !== "restart") return
+    libraryBusySlug = slug
+    libraryControlProcess.command = ["systemctl", "--user", verb, lib.unit]
+    libraryControlProcess.running = true
+  }
+
+  function toggleLibrary(slug) {
+    var lib = libraryBySlug(slug)
+    if (lib) libraryControl(slug, lib.active ? "stop" : "start")
+  }
+
+  function openLibraryFolder(lib) {
+    if (!lib || !lib.syncDir) return
+    Quickshell.execDetached(["uwsm-app", "--", "xdg-open", lib.syncDir])
+  }
+
+  function openLibraryRoot() {
+    Quickshell.execDetached(["bash", "-c", "mkdir -p \"$1\" && exec uwsm-app -- xdg-open \"$1\"", "_", libraryRoot])
+  }
+
+  // Stopping, disabling and deleting a library asks for confirmation, so the
+  // helper runs in a terminal.
+  function removeLibrary(slug) {
+    if (!libraryBySlug(slug)) return
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.onedrive-sync", toolPath, "remove", slug])
+  }
+
+  // An odopen:// link by hand (the helper opens its own terminal).
+  function addLibrary(url) {
+    var u = String(url || "").trim()
+    if (u.indexOf("odopen://") !== 0 || /[\s"'<>]/.test(u)) return false
+    Quickshell.execDetached([toolPath, u])
+    return true
+  }
+
+  // Registers or drops the odopen:// handler as the setting says. Cheap and
+  // idempotent, so it also runs once per shell start to repair the
+  // registration after the plugin moved or updated.
+  function applySyncHandler() {
+    if (!installed || handlerProcess.running) return
+    handlerProcess.command = [toolPath, handleSyncButton ? "install-handler" : "uninstall-handler"]
+    handlerProcess.running = true
   }
 
   function applyStatus(text) {
@@ -608,7 +694,72 @@ Item {
     id: installedProcess
     running: true
     command: ["bash", "-c", "command -v onedrive >/dev/null"]
-    onExited: function(exitCode) { root.installed = exitCode === 0 }
+    onExited: function(exitCode) {
+      root.installed = exitCode === 0
+      if (root.installed) {
+        root.refreshLibraries()
+        root.applySyncHandler()
+      }
+    }
+  }
+
+  Process {
+    id: librariesProcess
+    running: false
+    command: [root.toolPath, "list"]
+    stdout: StdioCollector { id: librariesStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.librariesFetchedAtMs = Date.now()
+      var parsed = Model.parseLibraries(String(librariesStdout.text || ""))
+      if (parsed) {
+        root.libraries = parsed
+        root.librariesKnown = true
+      }
+      if (root.librariesAgain) {
+        root.librariesAgain = false
+        Qt.callLater(function() { root.refreshLibraries() })
+      }
+    }
+  }
+
+  Timer {
+    id: librarySettle
+    property int ticks: 0
+    interval: 1500
+    repeat: true
+    running: false
+    onTriggered: {
+      ticks += 1
+      root.librariesFetchedAtMs = 0
+      root.refreshLibraries()
+      if (ticks >= 4) { ticks = 0; running = false; root.libraryBusySlug = "" }
+    }
+  }
+
+  Process {
+    id: libraryControlProcess
+    running: false
+    command: []
+    stderr: StdioCollector { id: libraryControlStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.lastError = root.elide(String(libraryControlStderr.text || "") || "systemctl failed")
+        root.lastErrorAtMs = Date.now()
+      }
+      librarySettle.ticks = 0
+      librarySettle.restart()
+    }
+  }
+
+  Process {
+    id: handlerProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: handlerStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      var m = /^handler=(.*)$/m.exec(String(handlerStdout.text || ""))
+      root.syncHandler = m ? m[1].trim() : (exitCode === 0 ? "" : "?")
+    }
   }
 
   Process {

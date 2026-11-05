@@ -124,4 +124,29 @@ assert.deepStrictEqual(M.parseMessage("onedrive.service: Main process exited, co
 assert.deepStrictEqual(M.parseMessage("Starting a sync with Microsoft OneDrive"), { type: "cycleStart" })
 assert.strictEqual(M.escapeMarkup('ERROR: <a href="https://x">x</a> & <b>y</b>'), "ERROR: &lt;a href=&quot;https://x&quot;&gt;x&lt;/a&gt; &amp; &lt;b&gt;y&lt;/b&gt;".replace(/&quot;/g, '"'))
 assert.strictEqual(M.escapeMarkup(null), "")
+assert.strictEqual(M.pathFromUrl("file:///home/u/.config/omarchy/plugins/baskb.onedrive/bin/onedrive-odopen"), "/home/u/.config/omarchy/plugins/baskb.onedrive/bin/onedrive-odopen")
+assert.strictEqual(M.pathFromUrl("file:///home/u/My%20Dir/x"), "/home/u/My Dir/x")
+const libs = M.parseLibraries(JSON.stringify([
+  { slug: "zeta-documents", name: "Zeta - Documents", confDir: "/h/.config/onedrive-zeta-documents", syncDir: "/h/SharePoint/Zeta - Documents", webUrl: "https://x.sharepoint.com/sites/Zeta", active: true, enabled: true, unitExists: true,
+    status: { state: "idle", lastSync: "2026-11-05T15:39:18.8674733Z", lastResult: "success", failures: 0, reachability: "reachable", updatedAt: "2026-11-05T15:39:18.8674761Z" } },
+  { slug: "alpha", name: "Alpha", active: false, enabled: false, unitExists: false, webUrl: "javascript:alert(1)", status: null },
+  { slug: "Bad Slug!", name: "x" },
+  "garbage", null
+]))
+assert.strictEqual(libs.length, 2)
+assert.strictEqual(libs[0].slug, "alpha")
+assert.strictEqual(libs[0].webUrl, "")
+assert.strictEqual(libs[0].unit, "onedrive-alpha")
+assert.strictEqual(M.libraryState(libs[0]), "missing")
+assert.strictEqual(libs[1].name, "Zeta - Documents")
+assert.ok(libs[1].lastSyncMs > 0)
+assert.strictEqual(M.libraryState(libs[1]), "idle")
+assert.strictEqual(M.libraryState(Object.assign({}, libs[1], { active: false })), "paused")
+assert.strictEqual(M.libraryState(Object.assign({}, libs[1], { processState: "syncing" })), "syncing")
+assert.strictEqual(M.libraryState(Object.assign({}, libs[1], { lastResult: "partial_failure" })), "degraded")
+assert.strictEqual(M.libraryState(Object.assign({}, libs[1], { reachability: "unreachable" })), "offline")
+assert.strictEqual(M.libraryState(Object.assign({}, libs[1], { processState: "" })), "starting")
+assert.strictEqual(M.parseLibraries("not json"), null)
+assert.strictEqual(M.parseLibraries("{}"), null)
+assert.deepStrictEqual(M.parseLibraries("[]"), [])
 console.log("Model.test.js: all assertions passed")

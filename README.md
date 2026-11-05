@@ -37,6 +37,12 @@ bar shows nothing about your sync.
   `sync_list`, and sign in again.
 - **Keyboard first**, like the rest of the shell: arrows, Enter, `p` pause,
   `o` folder, `r` restart, `c` check, `s` settings, Esc back.
+- **SharePoint libraries from the browser's Sync button.** Press *Sync* on a
+  SharePoint document library (or another OneDrive) in Chromium and the plugin
+  picks up the `odopen://` link the page fires, sets up a second client
+  instance for that library, signs it in and starts its own user service.
+  The panel lists every library with its state, a pause switch and a remove
+  button. See [SharePoint libraries](#sharepoint-libraries-and-the-browsers-sync-button).
 - **Translated**: English and Dutch ship; add a language by dropping a JSON
   file in `i18n/`.
 
@@ -54,8 +60,8 @@ bar shows nothing about your sync.
   systemctl --user enable --now onedrive
   ```
 
-  `jq`, `curl`, `vercmp` and `notify-send` are used for the update check and
-  notifications; Omarchy ships them.
+  `jq`, `curl`, `vercmp` and `notify-send` are used for the update check,
+  notifications and the Sync button handler; Omarchy ships them.
 
 ## Install
 
@@ -95,6 +101,8 @@ works too: `omarchy bar set baskb.onedrive showStorage true --json`.
 | `recentLimit` | 12 | List length |
 | `showActions` | on | The action buttons |
 | `notifyOnFailure` | on | Desktop notification on failures |
+| `handleSyncButton` | on | Register for `odopen://` links, so the browser's Sync button sets up libraries |
+| `showLibraries` | on | The Libraries section in the panel |
 | `checkUpdates` | on | Ask the AUR and GitHub for a newer client (network) |
 | `updateCheckHours` | 6 | How long an update check is trusted |
 | `refreshIntervalSec` | 60 | Safety poll of the unit state; systemd's journal lines drive the usual refreshes |
@@ -102,6 +110,56 @@ works too: `omarchy bar set baskb.onedrive showStorage true --json`.
 
 "Start syncing at login" is not a widget setting but the unit's enabled
 state; the switch runs `systemctl --user enable` or `disable`.
+
+## SharePoint libraries and the browser's Sync button
+
+The OneDrive Client for Linux syncs exactly one drive per configuration, so a
+SharePoint document library (or a second OneDrive) needs its own config
+directory, sync folder and user service. On Windows the *Sync* button in the
+browser sets all that up through an `odopen://sync/?...` link that only
+Microsoft's client understands. Here the plugin registers itself for that
+link scheme, so the same button works on Omarchy:
+
+1. Open the library in the browser and press **Sync** (Chromium asks once
+   whether to open the link with *OneDrive for Omarchy*).
+2. A terminal opens and shows what it is about to set up: the library name,
+   the config under `~/.config/onedrive-<slug>`, the folder under
+   `~/SharePoint/<Site - Library>` and the service `onedrive-<slug>`. It asks
+   whether to sync the whole library or to edit a `sync_list` first.
+3. The client signs in to the library in your browser (the account the page
+   was signed in with is shown; sign in as that one), checks the library,
+   and the service is enabled and started.
+4. The panel lists the library under **Libraries** with its state and last
+   sync, a switch to pause it, and a remove button that stops, disables and
+   deletes the configuration (and asks separately about the local folder).
+
+How the library is identified: the link carries the SharePoint site, web and
+list GUIDs. When the main `onedrive` configuration is signed in to the same
+tenant, the helper asks Microsoft Graph for the library's drive id with that
+account's token (a no-sync operation of the client), and also recognises your
+own OneDrive so it is not set up twice. For another tenant the drive id is
+derived from the three GUIDs directly; the sign-in then happens with that
+tenant's account. Everything it does is logged to
+`~/.local/state/omarchy-onedrive/odopen.log`.
+
+The helper is `bin/onedrive-odopen` in the plugin directory and also works
+by hand:
+
+```
+onedrive-odopen 'odopen://sync/?...'   # what the Sync button runs
+onedrive-odopen parse 'odopen://...'   # show what a link would set up, change nothing
+onedrive-odopen list                   # the libraries as JSON, what the panel reads
+onedrive-odopen remove <slug>          # stop, disable and delete one
+```
+
+Libraries made by hand following the client's own
+[SharePoint guide](https://github.com/abraunegg/onedrive/blob/master/docs/sharepoint-libraries.md)
+show up too, as long as the config directory is `~/.config/onedrive-<slug>`
+and the unit is `onedrive-<slug>.service`.
+
+> The client's documentation warns that SharePoint has been known to modify
+> uploaded Office files and that file indexers can trigger unwanted uploads;
+> read its caution before syncing a shared library you do not own.
 
 ## How it works
 
@@ -112,6 +170,8 @@ state; the switch runs `systemctl --user enable` or `disable`.
 | `systemctl --user is-active / is-enabled onedrive` | paused vs running (refreshed when systemd logs a start or stop, plus a slow safety poll), start at login; `start`, `stop`, `restart`, `enable`, `disable` for the controls |
 | `onedrive --display-quota` | storage (rate limited, only when shown) |
 | `onedrive --display-sync-status` | the Check button; this is slow on a large account (minutes) |
+| `bin/onedrive-odopen list` | the extra libraries: each `~/.config/onedrive-<slug>` with its unit state and `monitor-status.json` |
+| `bin/onedrive-odopen install-handler` | the `x-scheme-handler/odopen` desktop entry, kept in step with the setting |
 | `pacman -Q`, AUR RPC, GitHub releases API | the client update check |
 
 Everything that comes from the log, a command or the network is rendered as
@@ -138,6 +198,9 @@ omarchy-shell baskb.onedrive checkResult    # its answer
 omarchy-shell baskb.onedrive checkUpdates   # run the client update check
 omarchy-shell baskb.onedrive updates        # its answer
 omarchy-shell baskb.onedrive status         # one line, e.g. "Syncing 21% (41/200 files, 3 min left)"
+omarchy-shell baskb.onedrive libraries      # one line per extra library with its state
+omarchy-shell baskb.onedrive rescan         # re-read the libraries now
+omarchy-shell baskb.onedrive add <odopen-url>  # set up a library from a link, as the Sync button would
 omarchy-shell baskb.onedrive set <key> <json>
 ```
 
@@ -158,7 +221,8 @@ real traffic.
 
 Files: `Panel.qml` (bar icon, panel, settings view, keyboard), `Service.qml`
 (status file, journal follow, unit control, client commands), `Model.js`
-(all parsing, pure functions, tested), `OneDriveIcon.qml`, `i18n/`.
+(all parsing, pure functions, tested), `OneDriveIcon.qml`, `i18n/`,
+`bin/onedrive-odopen` (the Sync button handler and library helper, bash).
 
 ## License
 
