@@ -12,6 +12,9 @@ var CYCLE_END = /^Sync with Microsoft OneDrive (?:is complete|was interrupted)/
 var REMOTE = /^Syncing changes from Microsoft OneDrive/
 var SCAN = /^(?:Performing a database consistency|Scanning the local file system|Performing a last examination|Process(?:ing|ed) \d+ applicable|Performing initial synchronisation)/
 var ERROR = /^ERROR: (.+)$/
+// systemd's own lines in the unit's journal, which say when the service
+// started or stopped without polling systemctl.
+var UNIT = /^((Started|Stopped|Stopping) OneDrive Client|onedrive\.service: )/
 
 var IMAGE_EXTENSIONS = { jpg: true, jpeg: true, png: true, gif: true, webp: true, avif: true, heic: true, svg: true, bmp: true, tif: true, tiff: true }
 var VIDEO_EXTENSIONS = { mp4: true, mov: true, mkv: true, webm: true, avi: true, m4v: true, mpg: true, mpeg: true, wmv: true }
@@ -54,6 +57,7 @@ function parseMessage(message) {
   if (REMOTE.test(text)) return { type: "phase", phase: "remote" }
   if (SCAN.test(text)) return { type: "phase", phase: "scan" }
   if ((m = ERROR.exec(text))) return { type: "error", text: m[1] }
+  if (UNIT.test(text)) return { type: "unit" }
   return null
 }
 
@@ -320,8 +324,15 @@ function parseUpdateCheck(text) {
   }
 }
 
+// For text handed to a sink that interprets markup, such as a notification
+// body (the daemon keeps a few tags).
+function escapeMarkup(text) {
+  return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    escapeMarkup: escapeMarkup,
     parseUpdateCheck: parseUpdateCheck,
     boolValue: boolValue,
     parseVersion: parseVersion,

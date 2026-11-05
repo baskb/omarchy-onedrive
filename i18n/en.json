@@ -53,7 +53,10 @@
   "action.restart.hint": "Restart the onedrive service and sync now",
   "action.quota.hint": "Ask Microsoft for the storage quota",
   "run.title": "Whole run",
-  "run.progress": "%1 of %2 files",
+  "run.progress": {
+    "one": "%1 of %2 file",
+    "other": "%1 of %2 files"
+  },
   "run.left": "%1 left",
   "info.thisRun": "This run",
   "info.lastRun": "Last run",

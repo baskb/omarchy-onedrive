@@ -457,8 +457,8 @@ Panel {
           x: (parent.width - width) / 2
           y: parent.height - height - 1
           width: Math.round(button.iconSize * 1.2)
-          height: 2
-          radius: 1
+          height: Style.space(2)
+          radius: height / 2
           color: root.barIconColor
           opacity: 0.3
         }
@@ -468,7 +468,7 @@ Panel {
           y: barTrack.y
           width: Math.round(barTrack.width * root.runFraction)
           height: barTrack.height
-          radius: 1
+          radius: barTrack.radius
           color: root.barIconColor
           Behavior on width { NumberAnimation { duration: Style.duration(300); easing.type: Easing.OutCubic } }
         }
@@ -655,7 +655,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     Layout.fillWidth: true
-                    text: strings.t("run.progress")
+                    text: strings.tn("run.progress", runCard.est.total)
                       .arg(Commons.I18n.formatNumber(runCard.est.done))
                       .arg(Commons.I18n.formatNumber(runCard.est.total))
                       + " · " + root.runLeftText

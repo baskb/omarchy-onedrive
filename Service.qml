@@ -97,7 +97,8 @@ Item {
   readonly property bool updateAvailable: !!updateInfo && updateInfo.aurNewer === true
   readonly property string updateVersion: updateInfo ? String(updateInfo.aurNewer ? updateInfo.aur : updateInfo.upstream) : ""
 
-  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 10, 3, 600)
+  // Safety poll only: the unit's own journal lines drive refreshes.
+  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 60, 3, 600)
   readonly property int recentLimit: intSetting("recentLimit", 12, 1, 50)
   readonly property int quotaRefreshMin: intSetting("quotaRefreshMin", 30, 1, 1440)
   readonly property bool busy: controlProcess.running
@@ -211,6 +212,10 @@ Item {
     if (event.type === "cycleStart") {
       startRun(at)
       phase = "scan"
+      return
+    }
+    if (event.type === "unit") {
+      if (!historical) refresh()
       return
     }
     if (event.type === "cycleEnd") {
@@ -341,7 +346,7 @@ Item {
     var now = Date.now()
     if (now - lastNotifyMs < 300000) return
     lastNotifyMs = now
-    Quickshell.execDetached(["notify-send", "-a", "OneDrive", "-u", "normal", "OneDrive", String(text)])
+    Quickshell.execDetached(["notify-send", "-a", "OneDrive", "-u", "normal", "OneDrive", Model.escapeMarkup(text)])
   }
 
   function refreshEnabled() {

@@ -53,7 +53,10 @@
   "action.restart.hint": "Herstart de onedrive-service en synchroniseer nu",
   "action.quota.hint": "Vraag het opslagquotum op bij Microsoft",
   "run.title": "Hele run",
-  "run.progress": "%1 van %2 bestanden",
+  "run.progress": {
+    "one": "%1 van %2 bestand",
+    "other": "%1 van %2 bestanden"
+  },
   "run.left": "nog %1",
   "info.thisRun": "Deze run",
   "info.lastRun": "Vorige run",

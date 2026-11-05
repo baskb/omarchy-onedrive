@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "baskb.onedrive",
   "name": "OneDrive",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Bastiaan Kortenbout",
   "license": "MIT",
   "homepage": "https://github.com/baskb/omarchy-onedrive",
@@ -23,7 +23,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalSec": 10,
+      "refreshIntervalSec": 60,
       "recentLimit": 12,
       "quotaRefreshMin": 30,
       "runBarMinSec": 60,
@@ -126,12 +126,12 @@
       {
         "key": "refreshIntervalSec",
         "type": "integer",
-        "label": "Status refresh interval (seconds)",
+        "label": "Unit state safety poll (seconds)",
         "min": 3,
         "max": 600,
         "step": 1,
-        "defaultValue": 10,
-        "description": ""
+        "defaultValue": 60,
+        "description": "The service's own journal lines drive refreshes; this poll only catches what they miss."
       },
       {
         "key": "quotaRefreshMin",

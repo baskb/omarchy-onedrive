@@ -63,6 +63,8 @@ bar shows nothing about your sync.
 omarchy plugin add https://github.com/baskb/omarchy-onedrive
 ```
 
+Like every shell plugin it runs unsandboxed inside your long-lived
+`omarchy-shell` process, so read the code before you enable it; it is small.
 Say yes to enable it and pick a bar section (right is the default). Or later:
 
 ```
@@ -95,7 +97,7 @@ works too: `omarchy bar set baskb.onedrive showStorage true --json`.
 | `notifyOnFailure` | on | Desktop notification on failures |
 | `checkUpdates` | on | Ask the AUR and GitHub for a newer client (network) |
 | `updateCheckHours` | 6 | How long an update check is trusted |
-| `refreshIntervalSec` | 10 | How often the unit state is polled |
+| `refreshIntervalSec` | 60 | Safety poll of the unit state; systemd's journal lines drive the usual refreshes |
 | `quotaRefreshMin` | 30 | How often storage may be asked from Microsoft |
 
 "Start syncing at login" is not a widget setting but the unit's enabled
@@ -107,7 +109,7 @@ state; the switch runs `systemctl --user enable` or `disable`.
 |---|---|
 | `~/.config/onedrive/monitor-status.json` | idle / syncing / degraded, last cycle, counters, reachability |
 | `journalctl --user -u onedrive -o json -f` | run totals ("Number of items to download: N"), per-file `... 45% \| ETA` lines, finished files, errors. A restarted follow resumes from the journald cursor. |
-| `systemctl --user is-active / is-enabled onedrive` | paused vs running, start at login; `start`, `stop`, `restart`, `enable`, `disable` for the controls |
+| `systemctl --user is-active / is-enabled onedrive` | paused vs running (refreshed when systemd logs a start or stop, plus a slow safety poll), start at login; `start`, `stop`, `restart`, `enable`, `disable` for the controls |
 | `onedrive --display-quota` | storage (rate limited, only when shown) |
 | `onedrive --display-sync-status` | the Check button; this is slow on a large account (minutes) |
 | `pacman -Q`, AUR RPC, GitHub releases API | the client update check |
